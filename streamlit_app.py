@@ -69,7 +69,20 @@ if uploaded_file is None:
 
 
 # -----------------------------
-# Load Document
+# Reset vector database if new file uploaded
+# -----------------------------
+
+if "last_file" not in st.session_state:
+    st.session_state.last_file = None
+    st.session_state.vectorstore = None
+
+if uploaded_file.name != st.session_state.last_file:
+    st.session_state.vectorstore = None
+    st.session_state.last_file = uploaded_file.name
+
+
+# -----------------------------
+# Load document
 # -----------------------------
 
 with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
@@ -108,13 +121,17 @@ embedding = HuggingFaceEmbeddings(
 
 
 # -----------------------------
-# Vector Database
+# Create vector database
 # -----------------------------
 
-vectorstore = Chroma.from_documents(
-    chunks,
-    embedding
-)
+if st.session_state.vectorstore is None:
+    st.session_state.vectorstore = Chroma.from_documents(
+        chunks,
+        embedding
+    )
+
+vectorstore = st.session_state.vectorstore
+
 
 retriever = vectorstore.as_retriever(
     search_type="similarity",
@@ -129,7 +146,7 @@ retriever = vectorstore.as_retriever(
 groq_api_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
 
 if not groq_api_key:
-    st.error("GROQ_API_KEY not found. Please set it in environment variables or Streamlit secrets.")
+    st.error("GROQ_API_KEY not found.")
     st.stop()
 
 llm = ChatGroq(
@@ -241,5 +258,3 @@ st.markdown("### Sources")
 
 for src in sources:
     st.write(src)
-
-
