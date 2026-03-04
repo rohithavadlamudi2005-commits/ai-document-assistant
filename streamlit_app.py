@@ -3,8 +3,7 @@ import os
 import streamlit as st
 import tempfile
 
-from langchain_community.document_loaders import DirectoryLoader, TextLoader
-from langchain_community.document_loaders import PyPDFLoader
+from langchain_community.document_loaders import TextLoader, PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores import Chroma
 from langchain_huggingface import HuggingFaceEmbeddings
@@ -12,14 +11,13 @@ from langchain_groq import ChatGroq
 
 
 # -----------------------------
-# Page Title
+# Page Configuration
 # -----------------------------
 
-st.title("🤖 AI Document Assistant")
+st.set_page_config(page_title="AI Document Assistant")
 
-st.markdown("""
-Upload a document or use the built-in knowledge base and let AI analyze it.
-""")
+st.title("🤖 AI Document Assistant")
+st.markdown("Upload a document and let AI analyze it.")
 
 
 # -----------------------------
@@ -44,16 +42,15 @@ st.sidebar.markdown("---")
 st.sidebar.markdown("### Try asking")
 
 st.sidebar.write("""
-• What is blockchain technology?  
-• Explain machine learning basics  
-• Summarize the climate change report  
-• What are common cybersecurity threats?  
-• Generate quiz questions from AI overview  
+• Summarize this document  
+• What are the key points?  
+• Explain this in simple terms  
+• Generate quiz questions  
 """)
 
 
 # -----------------------------
-# Upload file
+# Upload File
 # -----------------------------
 
 uploaded_file = st.file_uploader(
@@ -63,70 +60,65 @@ uploaded_file = st.file_uploader(
 
 
 # -----------------------------
-# Load documents
+# Stop if no file uploaded
 # -----------------------------
 
-if uploaded_file is not None:
+if uploaded_file is None:
+    st.info("Please upload a document to begin.")
+    st.stop()
 
-    with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
-        tmp_file.write(uploaded_file.read())
-        temp_path = tmp_file.name
 
-    if uploaded_file.type == "application/pdf":
-        loader = PyPDFLoader(temp_path)
-    else:
-        loader = TextLoader(temp_path)
+# -----------------------------
+# Load Document
+# -----------------------------
 
-    documents = loader.load()
+with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
+    tmp_file.write(uploaded_file.read())
+    temp_path = tmp_file.name
 
+if uploaded_file.type == "application/pdf":
+    loader = PyPDFLoader(temp_path)
 else:
+    loader = TextLoader(temp_path)
 
-    loader = DirectoryLoader(
-        "data",
-        glob="*.txt",
-        loader_cls=TextLoader
-    )
+documents = loader.load()
 
-    documents = loader.load()
-
-
-st.sidebar.markdown("### Knowledge Base")
-st.sidebar.write(f"Documents loaded: {len(documents)}")
+st.sidebar.write(f"Pages loaded: {len(documents)}")
 
 
 # -----------------------------
-# Split documents into chunks
+# Text Splitting
 # -----------------------------
 
 text_splitter = RecursiveCharacterTextSplitter(
-    chunk_size=500,
-    chunk_overlap=50
+    chunk_size=800,
+    chunk_overlap=100
 )
 
 chunks = text_splitter.split_documents(documents)
 
 
 # -----------------------------
-# Create Vector Database
+# Embeddings
 # -----------------------------
 
-def create_vectorstore(docs):
-
-    embedding = HuggingFaceEmbeddings()
-
-    vectorstore = Chroma.from_documents(
-        docs,
-        embedding
-    )
-
-    return vectorstore
+embedding = HuggingFaceEmbeddings(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
 
 
-vectorstore = create_vectorstore(chunks)
+# -----------------------------
+# Vector Database
+# -----------------------------
+
+vectorstore = Chroma.from_documents(
+    chunks,
+    embedding
+)
 
 retriever = vectorstore.as_retriever(
-    search_type="mmr",
-    search_kwargs={"k": 3}
+    search_type="similarity",
+    search_kwargs={"k": 5}
 )
 
 
@@ -134,8 +126,14 @@ retriever = vectorstore.as_retriever(
 # LLM Setup
 # -----------------------------
 
+groq_api_key = st.secrets.get("GROQ_API_KEY") or os.getenv("GROQ_API_KEY")
+
+if not groq_api_key:
+    st.error("GROQ_API_KEY not found. Please set it in environment variables or Streamlit secrets.")
+    st.stop()
+
 llm = ChatGroq(
-    api_key=os.getenv("GROQ_API_KEY"),
+    api_key=groq_api_key,
     model="llama-3.1-8b-instant"
 )
 
@@ -144,29 +142,32 @@ llm = ChatGroq(
 # User Query
 # -----------------------------
 
-query = st.text_input("Ask something about the document:")
+query = st.text_input("Ask something about the document")
+
+if not query:
+    st.stop()
 
 
-if query:
+# -----------------------------
+# Retrieve Context
+# -----------------------------
 
-    retrieved_docs = retriever.invoke(query)
+retrieved_docs = retriever.invoke(query)
 
-    context = "\n\n".join([doc.page_content for doc in retrieved_docs])
+context = "\n\n".join([doc.page_content for doc in retrieved_docs])
 
 
-    # -----------------------------
-    # Prompt Selection
-    # -----------------------------
+# -----------------------------
+# Prompt Selection
+# -----------------------------
 
-    if tool == "Chat with Document":
+if tool == "Chat with Document":
 
-        prompt = f"""
-You are an intelligent AI assistant.
+    prompt = f"""
+You are an AI assistant that answers ONLY using the provided context.
 
-Use the context below to answer the user's question.
-
-If the answer is not present in the context, say:
-"I could not find that information in the provided documents."
+If the answer is not in the context, say:
+"I could not find that information in the document."
 
 Context:
 {context}
@@ -176,72 +177,69 @@ Question:
 """
 
 
-    elif tool == "Extract Key Insights":
+elif tool == "Extract Key Insights":
 
-        prompt = f"""
-Extract the key insights from the following document.
-
-Document:
-{context}
-"""
-
-
-    elif tool == "Generate Quiz Questions":
-
-        prompt = f"""
-Generate 5 quiz questions based on the following document.
+    prompt = f"""
+Extract the key insights from this document.
 
 Document:
 {context}
 """
 
 
-    elif tool == "Explain Simply":
+elif tool == "Generate Quiz Questions":
 
-        prompt = f"""
-Explain the following content in simple terms for beginners.
+    prompt = f"""
+Generate 5 quiz questions based on this document.
+
+Document:
+{context}
+"""
+
+
+elif tool == "Explain Simply":
+
+    prompt = f"""
+Explain this content in simple terms for beginners.
 
 Content:
 {context}
 """
 
 
-    else:
+else:
 
-        prompt = f"""
-Summarize the following document clearly.
+    prompt = f"""
+Summarize this document clearly.
 
 Document:
 {context}
 """
 
 
-    # -----------------------------
-    # AI Response
-    # -----------------------------
+# -----------------------------
+# LLM Response
+# -----------------------------
 
-    with st.spinner("AI is analyzing the document..."):
-        response = llm.invoke(prompt)
+with st.spinner("AI is analyzing the document..."):
+    response = llm.invoke(prompt)
 
-    st.subheader("AI Response")
+st.subheader("AI Response")
+st.write(response.content)
 
-    st.write(response.content)
 
+# -----------------------------
+# Sources
+# -----------------------------
 
-    # -----------------------------
-    # Sources
-    # -----------------------------
+sources = set()
 
-    sources = set()
+for doc in retrieved_docs:
+    sources.add(doc.metadata.get("source", "Uploaded document"))
 
-    for doc in retrieved_docs:
-        sources.add(doc.metadata.get("source", "Unknown"))
+st.markdown("### Sources")
 
-    st.markdown("### Sources")
-
-    for src in sources:
-        st.write(src)
-
-    st.markdown("---")
+for src in sources:
+    st.write(src)
 
 
