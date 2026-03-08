@@ -1,31 +1,35 @@
 
 import streamlit as st
 import tempfile
-import re
-import os
 from pypdf import PdfReader
 
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import Chroma
+from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_groq import ChatGroq
 
+
+# -----------------------------
+# Page Config
+# -----------------------------
 
 st.set_page_config(page_title="AI Document Assistant", layout="wide")
 
 st.title("🤖 AI Document Assistant")
 
-st.markdown("""
-Upload a document and analyze it using AI.
+st.markdown(
+"""
+Upload a document or use built-in sample documents and interact with them using AI.
 
-Features:
-• Summarize documents  
-• Extract key insights  
-• Generate quiz questions  
-• Explain concepts simply  
-• Chat with your document
-""")
-
+**Features**
+- Chat with documents
+- Summarize documents
+- Extract key insights
+- Generate quiz questions
+- Explain concepts simply
+"""
+)
 
 # -----------------------------
 # Sidebar
@@ -42,33 +46,15 @@ tool = st.sidebar.selectbox(
     ]
 )
 
-
 # -----------------------------
 # Upload File
 # -----------------------------
 
 uploaded_file = st.file_uploader("Upload a document", type=["pdf", "txt"])
 
-if not uploaded_file:
-    st.info("Upload a document to begin.")
-    st.stop()
-
 
 # -----------------------------
-# Clean Text
-# -----------------------------
-
-def clean_text(text):
-
-    text = re.sub(r"\s+", " ", text)
-    text = re.sub(r"Page \d+", "", text)
-    text = re.sub(r"[•●►■□◆]", "", text)
-
-    return text.strip()
-
-
-# -----------------------------
-# Extract PDF text
+# Extract PDF Text
 # -----------------------------
 
 def load_pdf_text(path):
@@ -77,9 +63,7 @@ def load_pdf_text(path):
     text = ""
 
     for page in reader.pages:
-
         page_text = page.extract_text()
-
         if page_text:
             text += page_text + "\n"
 
@@ -87,58 +71,53 @@ def load_pdf_text(path):
 
 
 # -----------------------------
-# Save uploaded file
+# Load Documents
 # -----------------------------
 
-with tempfile.NamedTemporaryFile(delete=False) as tmp:
+documents = []
 
-    tmp.write(uploaded_file.read())
-    file_path = tmp.name
+if uploaded_file:
 
+    with tempfile.NamedTemporaryFile(delete=False) as tmp:
+        tmp.write(uploaded_file.read())
+        file_path = tmp.name
 
-# -----------------------------
-# Read file
-# -----------------------------
+    if uploaded_file.type == "application/pdf":
+        raw_text = load_pdf_text(file_path)
+    else:
+        raw_text = open(file_path).read()
 
-if uploaded_file.type == "application/pdf":
-
-    raw_text = load_pdf_text(file_path)
+    documents = [raw_text]
 
 else:
 
-    raw_text = open(file_path).read()
+    st.info("Using sample documents from data folder.")
 
+    loader = DirectoryLoader(
+        "data",
+        glob="*.txt",
+        loader_cls=TextLoader
+    )
 
-if not raw_text or len(raw_text.strip()) < 20:
+    loaded_docs = loader.load()
 
-    st.error("Could not extract readable text from this file.")
-    st.stop()
-
-
-text = clean_text(raw_text)
+    documents = [doc.page_content for doc in loaded_docs]
 
 
 # -----------------------------
-# Split document
+# Split Documents
 # -----------------------------
 
 splitter = RecursiveCharacterTextSplitter(
-    chunk_size=1200,
-    chunk_overlap=200
+    chunk_size=1000,
+    chunk_overlap=150
 )
 
-docs = splitter.create_documents([text])
-
-docs = [d for d in docs if len(d.page_content.strip()) > 30]
-
-if not docs:
-
-    st.error("Document contains no usable content.")
-    st.stop()
+docs = splitter.create_documents(documents)
 
 
 # -----------------------------
-# Embeddings
+# Load Embeddings
 # -----------------------------
 
 @st.cache_resource
@@ -148,24 +127,19 @@ def load_embeddings():
         model_name="sentence-transformers/all-MiniLM-L6-v2"
     )
 
-
 embeddings = load_embeddings()
 
 
 # -----------------------------
-# Reset vector store when new file uploaded
+# Create Vectorstore
 # -----------------------------
 
-if "vectorstore" not in st.session_state or st.session_state.get("current_file") != uploaded_file.name:
+@st.cache_resource
+def create_vectorstore(docs):
 
-    vectorstore = Chroma.from_documents(docs, embeddings)
+    return Chroma.from_documents(docs, embeddings)
 
-    st.session_state.vectorstore = vectorstore
-    st.session_state.current_file = uploaded_file.name
-
-else:
-
-    vectorstore = st.session_state.vectorstore
+vectorstore = create_vectorstore(docs)
 
 
 # -----------------------------
@@ -174,19 +148,18 @@ else:
 
 retriever = vectorstore.as_retriever(
     search_type="mmr",
-    search_kwargs={
-        "k": 4,
-        "fetch_k": 12
-    }
+    search_kwargs={"k": 4, "fetch_k": 10}
 )
 
 
 # -----------------------------
-# Load LLM
+# LLM (Groq)
 # -----------------------------
 
+GROQ_API_KEY = "YOUR_GROQ_API_KEY"
+
 llm = ChatGroq(
-    api_key=os.getenv("GROQ_API_KEY"),
+    api_key=GROQ_API_KEY,
     model="llama-3.1-8b-instant"
 )
 
@@ -198,34 +171,28 @@ llm = ChatGroq(
 col1, col2 = st.columns([1,2])
 
 
-# -----------------------------
-# Document Info
-# -----------------------------
-
 with col1:
 
     st.subheader("📄 Document Info")
 
-    st.write("File:", uploaded_file.name)
-    st.write("Chunks:", len(docs))
-    st.write("Text length:", len(text))
+    st.write("Total chunks:", len(docs))
 
-
-# -----------------------------
-# AI Assistant
-# -----------------------------
 
 with col2:
 
     st.subheader("🤖 AI Assistant")
 
 
+    # -----------------------------
+    # Summarize
+    # -----------------------------
+
     if tool == "Summarize Document":
 
         context = "\n\n".join([d.page_content for d in docs[:6]])
 
         prompt = f"""
-Use ONLY the document context to produce a summary.
+Summarize the following document.
 
 Context:
 {context}
@@ -237,12 +204,16 @@ Context:
         st.write(response.content)
 
 
+    # -----------------------------
+    # Key Insights
+    # -----------------------------
+
     elif tool == "Extract Key Insights":
 
         context = "\n\n".join([d.page_content for d in docs[:6]])
 
         prompt = f"""
-Use the document context to extract key insights.
+Extract key insights from the document.
 
 Context:
 {context}
@@ -254,14 +225,18 @@ Context:
         st.write(response.content)
 
 
+    # -----------------------------
+    # Quiz Questions
+    # -----------------------------
+
     elif tool == "Generate Quiz Questions":
 
-        retrieved_docs = retriever.invoke("main concepts definitions topics")
+        retrieved_docs = retriever.invoke("important concepts definitions")
 
         context = "\n\n".join([doc.page_content for doc in retrieved_docs[:3]])
 
         prompt = f"""
-Create 5 multiple-choice quiz questions using ONLY the document context.
+Generate 5 quiz questions based on the document.
 
 Context:
 {context}
@@ -273,6 +248,10 @@ Context:
         st.write(response.content)
 
 
+    # -----------------------------
+    # Explain Simply
+    # -----------------------------
+
     elif tool == "Explain Simply":
 
         retrieved_docs = retriever.invoke("important concepts")
@@ -280,7 +259,7 @@ Context:
         context = "\n\n".join([doc.page_content for doc in retrieved_docs[:3]])
 
         prompt = f"""
-Explain the following document content in simple terms.
+Explain the following content in simple terms.
 
 Context:
 {context}
@@ -290,6 +269,10 @@ Context:
 
         st.write(response.content)
 
+
+    # -----------------------------
+    # Chat with Document
+    # -----------------------------
 
     elif tool == "Chat with Document":
 
@@ -318,4 +301,4 @@ Question:
 
             with st.chat_message("assistant"):
                 st.write(response.content)
-# latest update
+
